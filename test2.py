@@ -29,13 +29,15 @@ final_df.select("cust_id").show()
 
 # Perform the first join and fetch chl_key
 join1 = fop_uk_ref_data_b_chn_map.join(rolb_evnt_dil, fop_uk_ref_data_b_chn_map.chl_cd == rolb_evnt_dil.chnl_ed) \
-                                 .select(fop_uk_ref_data_b_chn_map.chl_key)
+                                 .select(fop_uk_ref_data_b_chn_map.chl_key, rolb_evnt_dil.evnt_od, rolb_evnt_dil.err_cd)
 
 # Perform the second join and fetch evnt_key
-join2 = fop_uk_ref_data_b_rob_evnt_map.join(rolb_evnt_t, fop_uk_ref_data_b_rob_evnt_map.evnt_ed == rolb_evnt_t.evnt_od) \
-                                      .select(fop_uk_ref_data_b_rob_evnt_map.evnt_key)
+join2 = join1.join(fop_uk_ref_data_b_rob_evnt_map, join1.evnt_od == fop_uk_ref_data_b_rob_evnt_map.evnt_ed) \
+             .select(join1.chl_key, fop_uk_ref_data_b_rob_evnt_map.evnt_key, join1.err_cd)
 
 # Perform the third join and fetch err_key
-join3 = fap_uk_ref_data_db_rob_err_map.join(rolb_evnt_dil, fap_uk_ref_data_db_rob_err_map.err_cd == rolb_evnt_dil.err_cd) \
-                                      .select(fap_uk_ref_data_db_rob_err_map.err_key)
+final_df = join2.join(fap_uk_ref_data_db_rob_err_map, join2.err_cd == fap_uk_ref_data_db_rob_err_map.err_cd) \
+                .select(join2.chl_key, join2.evnt_key, fap_uk_ref_data_db_rob_err_map.err_key)
 
+# Show the final DataFrame
+final_df.show()
