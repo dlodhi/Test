@@ -115,6 +115,23 @@ print("Removed Journeys:")
 removed_journeys.show()
 
 print("Not Removed Journeys:")
+
+
+
+# Define the regular expression pattern to extract all data between double quotes
+pattern = r'\"(.*?)\"'
+
+# Extract all occurrences of data between double quotes
+df = df.withColumn("ExtractedData", expr(f"regexp_extract_all(ComplexJourneyAttributes, '{pattern}')"))
+
+
+# Create DataFrame
+df = spark.createDataFrame(data, ["text"])
+
+# Extract text between escaped double quotes using regular expression
+df_extracted = df.withColumn("extracted_text", regexp_extract("text", r'\\\"(.*?)\\\"', 1))
+
+
 not_removed_journeys.show()
 
 # Stop Spark session
