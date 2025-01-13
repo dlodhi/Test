@@ -135,6 +135,10 @@ df_extracted = df.withColumn("extracted_text", regexp_extract("text", r'\\\"(.*?
 # Extract text between \'""\' using regular expression
 df_extracted = df.withColumn("extracted_text", regexp_extract("text", r"\\\'\"(.*?)\"\\\'", 1))
 
+regex = r'\"\"(.*?)\\\"\"'
+
+# Extract data between double quotes
+extracted_df = df.withColumn("extracted", regexp_extract("details", regex, 1))
 
 not_removed_journeys.show()
 
