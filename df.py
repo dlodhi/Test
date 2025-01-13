@@ -132,6 +132,10 @@ df = spark.createDataFrame(data, ["text"])
 df_extracted = df.withColumn("extracted_text", regexp_extract("text", r'\\\"(.*?)\\\"', 1))
 
 
+# Extract text between \'""\' using regular expression
+df_extracted = df.withColumn("extracted_text", regexp_extract("text", r"\\\'\"(.*?)\"\\\'", 1))
+
+
 not_removed_journeys.show()
 
 # Stop Spark session
