@@ -400,3 +400,100 @@ result_transformed = result.withColumn("new_col", when((lower(col("filter_coll")
 # Show result
 result_transformed.show()
 
+
+
+
+-------------------------------------------------------------------------------------------------------------------------
+
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, lower, rtrim, split, collect_list, max as spark_max
+
+# Initialize Spark session
+spark = SparkSession.builder.appName("MultiConfigTranspose").getOrCreate()
+
+# Step 1 - Create multi config transpose file
+# Read fdp_uk_ref_data_db.mlt_chnl_confg_map
+mlt_chnl_confg_map = spark.read.table("fdp_uk_ref_data_db.mlt_chnl_confg_map")
+chnl_map = spark.read.table("fdp_uk_ref_data_db.chnl_map")
+
+# Filter active=1 and chnl_key
+chnl_key = chnl_map.filter((col("active") == 1) & (col("chnl_cd") == 'OLB')).select("chnl_key").first()[0]
+filtered_mlt_chnl_confg_map = mlt_chnl_confg_map.filter((col("active") == 1) & (col("chnl_key") == chnl_key))
+
+# Apply transformations
+transformed_mlt_chnl_confg_map = filtered_mlt_chnl_confg_map.withColumn("filter_coll", lower(rtrim(col("filter_coll")))) \
+    .withColumn("filter_co12", lower(rtrim(col("filter_co12")))) \
+    .withColumn("value_col", col("value_col")) \
+    .withColumn("filter_cond1", lower(rtrim(col("filter_cond1")))) \
+    .withColumn("filter_cond2", lower(rtrim(col("filter_cond2")))) \
+    .withColumn("new_col", lower(rtrim(col("new_trans_col"))))
+
+# Step 2 - Read fdp_uk_ref_data_db.cust_jrny_confg_map and discover unique tag
+cust_jrny_confg_map = spark.read.table("fdp_uk_ref_data_db.cust_jrny_confg_map")
+
+# Filter active=1 and chnl_key
+filtered_cust_jrny_confg_map = cust_jrny_confg_map.filter((col("active") == 1) & (col("chnl_key") == chnl_key))
+
+# Extract fields and unique tags
+unique_tags = filtered_cust_jrny_confg_map.withColumn("cmpx_jrny_tag", lower(split(col("cmpx_jrny_tag"), ","))) \
+    .select("evnt_cd", "cmpx_jrny_tag").distinct()
+
+# Combine unique tags by grouping on evnt_cd
+combined_tags = unique_tags.groupBy("evnt_cd").agg(collect_list("cmpx_jrny_tag").alias("cmpx_jrny_tag_vec"))
+
+# Step 3 - Read e_rolb_db.psdm_rolb_audit_details table
+psdm_rolb_audit_details = spark.read.table("e_rolb_db.psdm_rolb_audit_details")
+
+# Filter log_dte and tagvalue conditions
+filtered_psdm_rolb_audit_details = psdm_rolb_audit_details.filter(
+    (col("log_dte") == "$CURR_BUS_DT") &
+    (col("tagvalue").isNotNull()) &
+    (col("tagvalue") != "") &
+    (lower(rtrim(col("tagvalue"))) != 'null')
+)
+
+# Apply transformations
+transformed_psdm_rolb_audit_details = filtered_psdm_rolb_audit_details.withColumn(
+    "tagname", 
+    when(lower(rtrim(col("acn_cat_nme"))).isin(['/olb/bulkpay/grouppaymentstepfour.json', '/olb/fxpay/mrp/payments-json']),
+         regexp_replace(rtrim(col("tagname")), "[_0-9]", "*")
+    ).otherwise(col("tagname"))
+).withColumn(
+    "vol", 
+    when((lower(rtrim(col("acn_cat_nme"))) == '/olb/bulkpay/grouppaymentstepfour.json') &
+         (instr(rtrim(col("tagname")), "_") > 0) &
+         (size(split(rtrim(col("tagname")), " ")) > 1),
+         split(rtrim(col("tagname")), "_")[1]
+    ).otherwise(1)
+)
+
+# Deduplicate
+deduped_psdm_rolb_audit_details = transformed_psdm_rolb_audit_details.dropDuplicates(["uid", "log_dte", "tagname", "tagvalue"])
+
+# Group and apply transformations using lookup 'multi config transpose' file
+grouped_psdm_rolb_audit_details = deduped_psdm_rolb_audit_details.groupBy("uid").agg(
+    spark_max("vol").alias("vol"),
+    # Add other fields as needed
+)
+
+# Join with multi config transpose file
+final_result = grouped_psdm_rolb_audit_details.join(transformed_mlt_chnl_confg_map, on="uid", how="left")
+
+# Apply final transformations
+final_result = final_result.withColumn(
+    "new_col",
+    when((lower(col("filter_coll")) == col("filter_cond1")) &
+         (lower(col("filter_co12")) == col("filter_cond2")),
+         col("value_col")
+    ).otherwise(col("new_col"))
+).withColumn(
+    "tag_vec",
+    when(col("tagname").isin(combined_tags.select("cmpx_jrny_tag_vec").collect()[0]),
+         array(struct(col("tagname"), col("tagvalue")))
+    ).otherwise(col("tag_vec"))
+)
+
+# Show final result
+final_result.show()
+
