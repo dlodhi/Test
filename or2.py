@@ -112,6 +112,173 @@ def main(spark, curr_bus_dt):
 -------------------------------------------------------------------------------------------------------------------------
 
 
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+# Step 1: Create multi-config transpose file
+# Read tables
+mlt_chnl_config_map = spark.table("fdp_uk.ref_data_db.mlt_chnl_config_map")
+chnl_map = spark.table("fdp_uk.ref_data_db.chnl_map")
+
+# Get chnl_key for OLB
+olb_chnl_key = chnl_map.filter(
+    (F.col("active") == 1) & 
+    (F.col("chnl_cd") == "OLB")
+).select("chnl_key").first()[0]  # Assuming unique result
+
+# Filter and transform
+step1_df = mlt_chnl_config_map.filter(
+    (F.col("active") == 1) & 
+    (F.col("chnl_key") == olb_chnl_key)
+).withColumn("filter_col1", F.lower(F.trim("filter_col1"))) \
+ .withColumn("filter_col2", F.lower(F.trim("filter_col2"))) \
+ .withColumn("value_col", F.col("val_col")) \
+ .withColumn("filter_cond1", F.lower(F.trim("filter_condn1"))) \
+ .withColumn("filter_cond2", F.lower(F.trim("filter_condn2"))) \
+ .withColumn("new_col", F.lower(F.trim("new_trans_col")))
+
+# Step 2: Process cust_jmy_config_map for unique tags
+cust_jmy_config_map = spark.table("fdp_uk.ref_data_db.cust_jmy_config_map")
+
+# Filter and get unique tags
+step2_df = cust_jmy_config_map.filter(
+    (F.col("active") == 1) & 
+    (F.col("chnl_key") == olb_chnl_key)
+).select("evnt_cd", "emplx_jmy_tag") \
+ .withColumn("emplx_jmy_tag", F.split(F.lower(F.trim("emplx_jmy_tag")), ",")) \
+ .withColumn("emplx_jmy_tag", F.explode("emplx_jmy_tag")) \
+ .groupBy("evnt_cd").agg(F.collect_set("emplx_jmy_tag").alias("emplx_jmy_tag_vec"))
+
+# Step 3: Process psdm_rob_audit_details
+psdm_rob_audit = spark.table("c_rob_db.psdm_rob_audit_details")
+
+# Filter and transform
+step3_df = psdm_rob_audit.filter(
+    (F.col("log_dte") == F.lit("$CURR_BUS_DT")) &
+    F.col("tagvalue").isNotNull() &
+    (F.trim(F.col("tagvalue")) != "") &
+    (F.lower(F.trim("tagvalue")) != "null")
+).withColumn("tagname", 
+    F.when(
+        F.lower(F.trim("acn_cat_mne")).isin(['/olb/bulkpay/grouppaymentstepfour.json', '/olb/fspay/mrp/payments.json']),
+        F.regexp_replace(F.trim("tagname"), "\.[0-9]+", "")
+    ).otherwise(F.col("tagname"))
+).withColumn("vol",
+    F.when(
+        (F.lower(F.trim("acn_cat_mne")) == '/olb/bulkpay/grouppaymentstepfour.json') &
+        (F.indexOf(F.trim("tagname"), ".") > 0) &
+        (F.size(F.split(F.trim("tagname"), "\.")) > 1),
+        F.split(F.trim("tagname"), "\.")[1]
+    ).otherwise(F.lit(None).cast("string"))
+).dropDuplicates(["uid", "log_dte", "tagname", "tagvalue"])
+
+# Join with step1 config (assuming broadcast for small lookup)
+step3_df = step3_df.join(
+    F.broadcast(step1_df),
+    (F.lower(F.trim(step3_df["filter_col1"])) == step1_df["filter_cond1"]) &
+    (F.lower(F.trim(step3_df["filter_col2"])) == step1_df["filter_cond2"]),
+    "left"
+).select(step3_df["*"], step1_df["new_col"], step1_df["value_col"])
+
+# Step 4: Process psdm_roll_audit_log_main
+psdm_roll_log = spark.table("e_roll_db.psdm_roll_audit_log_main")
+
+step4_df = psdm_roll_log.filter(
+    (F.col("log_dte") == F.lit("$CURR_BUS_DT")) &
+    F.col("tagvalue").isNotNull() &
+    (F.trim(F.col("tagvalue")) != "") &
+    (F.lower(F.trim("tagvalue")) != "null")
+).withColumn("cus_idr", F.coalesce(F.trim("cus_idr"), F.lit("-99"))) \
+ .withColumn("mmb_num", F.coalesce(F.trim("mmb_num"), F.lit("-99"))) \
+ .withColumn("err_msg_txt", 
+    F.when(
+        F.lower(F.coalesce(F.trim("err_msg_txt"), "none")).isin(["none", "null"]),
+        "none"
+    ).otherwise(F.trim("err_msg_txt"))
+ )
+
+# Step 5: Right join step3 and step4 on UID
+step5_df = step3_df.join(step4_df, "uid", "right") \
+.withColumn("v_to_acct_id_t",
+    F.when(
+        (F.col("sortcode1_t").isNotNull()) &
+        (F.col("sortcode2_t").isNotNull()) &
+        (F.col("sortcode3_t").isNotNull()),
+        F.concat(F.trim("sortcode1_t"), F.trim("sortcode2_t"), F.trim("sortcode3_t"))
+    ).otherwise(F.col("to_acct_id"))
+).withColumn("fr_acct_id",
+    F.coalesce(
+        F.regexp_replace(F.trim("fr_acct_id"), "[^0-9]", ""),
+        F.regexp_replace(F.trim("prd_key"), "[^40-9]", ""),
+        F.regexp_replace(F.trim("src_idw_tp"), "[^0-9]", ""),
+        F.regexp_replace(F.trim("val"), "[^0-9.]", "")
+    )
+).withColumn("mmb_num",
+    F.when(
+        (F.coalesce(F.trim("mmb_num"), "0") == "999999999999") &
+        F.col("mmb_nub_t").isNotNull() &
+        (F.trim("mmb_nub_t") != ""),
+        F.trim("mmb_nub_t")
+    ).otherwise(F.col("mmb_num"))
+)
+
+# Step 6: Process tdlcuni
+tdlcuni = spark.table("e_customer_db.tdlcuni")
+
+window_spec = Window.partitionBy("nmb_lnk_mmb_num").orderBy(
+    F.desc("priority"), F.desc("eff_start_date"), "cus_idr"
+)
+
+step6_df = tdlcuni.filter(
+    (F.upper(F.trim("mmb_lnk_sts")) == "AC") &
+    F.col("mmb_lnk_mmb_num").isNotNull() &
+    (F.col("mmb_lnk_end_dte").isNull() | (F.trim("mmb_lnk_end_dte") == ""))
+).withColumn("priority",
+    F.when(F.trim("mmb_lnk_fls_type").isin(["02", "03"]), "B").otherwise("P")
+).withColumn("rank", F.row_number().over(window_spec)) \
+ .filter(F.col("rank") == 1).drop("rank")
+
+# Step 7: Left join step5 and step6 on mmb_num and finalize fields
+final_df = step5_df.join(step6_df, "mmb_num", "left") \
+.withColumn("cus_idr", 
+    F.when(F.trim("cus_idr").isNotNull(), F.trim("cus_idr")).otherwise(F.lit("-99"))
+).withColumn("event_id", F.lit("10001028")) \
+.withColumn("chnl_cd", F.lit("OLB")) \
+.withColumn("event_cd", F.trim("den_cat_mme")) \
+.withColumn("err_cd",
+    F.when(
+        (F.length(F.trim("err_msq_txt_t")) < 20) &
+        F.col("err_msq_txt_t").isNotNull() &
+        (F.lower(F.trim("err_msq_txt_t")) != "none"),
+        F.trim("err_msq_txt_t")
+    ).when(
+        (F.col("err_msq_txt_t").isNull() | (F.lower(F.trim("err_msq_txt_t")) == "none")) &
+        F.col("stopflow_t").isNotNull(),
+        F.trim("stopflow_t")
+    )
+)
+
+# Reference table joins (assuming chnl_map and event_map exist)
+chnl_map = spark.table("fdp_uk.ref_data_db.chnl_map").filter(F.col("active") == 1)
+event_map = spark.table("fdp_uk.ref_data_db.roll_event_map").filter(F.col("active") == 1)
+
+final_df = final_df.join(
+    chnl_map.select("chnl_cd", "chnl_key"),
+    "chnl_cd",
+    "left"
+).join(
+    event_map.select("event_cd", "event_key"),
+    "event_cd",
+    "left"
+)
+
+# Display result
+final_df.show()
+
+
+-------------------------------------------------------------------------------------------------------------------------
+
+
 
 
 from pyspark.sql import SparkSession
