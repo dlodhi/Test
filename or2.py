@@ -13,6 +13,15 @@ final_result = final_result.withColumn(
 
 #c
 
+df.withColumn("json", f.to_json(f.struct("dma", "zip_code"))).show(truncate=False)
+
+@udf(T.MapType(T.StringType(), T.StringType()))
+def create_struct(zip_code, dma):
+    return {zip_code: dma}
+
+data.withColumn('struct', create_struct(data.zip_code, data.dma)).toJSON().collect()
+
+
 
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
