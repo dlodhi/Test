@@ -1,3 +1,18 @@
+final_result = final_result.withColumn(
+    "new_col",
+    when((lower(col("filter_coll")) == col("filter_cond1")) &
+         (lower(col("filter_co12")) == col("filter_cond2")),
+         col("value_col")
+    ).otherwise(col("new_col"))
+).withColumn(
+    "tag_vec",
+    when(col("tagname").isin(combined_tags.select("cmpx_jrny_tag_vec").collect()[0]),
+         array(struct(col("tagname").alias("tagname"), col("tagvalue").alias("tagvalue")))
+    ).otherwise(col("tag_vec"))
+)
+
+
+
 
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
